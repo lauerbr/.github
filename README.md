@@ -14,6 +14,7 @@ repository's Settings page, or the next `terraform apply` reverts them.
 | Workflow | Called as |
 |---|---|
 | `ci-gate` | `lauerbr/.github/.github/workflows/ci-gate.yml@main` |
+| `repo-backup` | `lauerbr/.github/.github/workflows/repo-backup.yml@main` |
 
 The doubled `.github/.github/` is correct: the first is this repository's
 name, the second is the `.github/` directory that GitHub requires every
@@ -25,6 +26,16 @@ deadlocking itself. Read the header of `.github/workflows/ci-gate.yml` before
 editing it — the constraints in there are each the fix for a specific way of
 bricking a repository, and now that the definition is shared, breaking one
 breaks every caller at once.
+
+`repo-backup` archives `HEAD` as a zip and uploads it to the caller's S3
+backup bucket. Callers own the schedule; this file is `workflow_call`-only.
+OIDC and the bucket live in the **caller** (the first caller is
+`ground-orbit-website` bootstrap). This repository does not assume AWS
+roles. Adding a new caller means that repository gets a three-line caller
+workflow plus its `main` subject listed on the backup role trust policy
+(`StringEquals`, no wildcards). Do not add an `environment:` key on the
+reusable job — that would change the OIDC `sub` to `environment:...`, and
+the backup role is pinned to `ref:refs/heads/main`.
 
 ## The setting that makes this repository work, and is managed by nothing
 
