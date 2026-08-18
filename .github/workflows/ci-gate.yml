@@ -1,0 +1,117 @@
+name: ci gate (reusable)
+
+# ---------------------------------------------------------------------------
+# THE SHARED COPY OF THE ONE JOB THAT ALWAYS REPORTS A CHECK.
+#
+# `aws-network`, `aws-organizations`, `ground-orbit-website` and
+# `coding-agents-agentcore` each carry a near-identical `ci-gate.yml` of their
+# own. This file exists so that job can eventually have one definition instead
+# of four, because four copies of a file whose entire value is "it never fails
+# to report" means four places a well-meaning edit can brick a repository
+# without anyone noticing the other three.
+#
+# WHY THE JOB EXISTS AT ALL. A required status check is matched by NAME, and
+# GitHub treats a check that never reports as pending FOREVER — not failed,
+# not skipped, pending. So requiring a job that a `paths:` filter can skip
+# makes any pull request outside those paths permanently unmergeable, with no
+# failing check anywhere to point at. Every repository in this estate whose
+# real CI is path-filtered needs one check that cannot be skipped, and this is
+# it. It deliberately asserts nothing about the code.
+#
+# HOW TO CALL IT — and yes, the path really does say `.github` twice:
+#
+#     jobs:
+#       ci-gate:
+#         uses: lauerbr/.github/.github/workflows/ci-gate.yml@main
+#
+# The first `.github` is the REPOSITORY name; the second is the `.github/`
+# directory inside it, where GitHub requires every workflow file to live. It
+# reads like a copy-paste error and is not. Deleting either one produces
+# "workflow was not found", which is the same message you get for half a dozen
+# unrelated mistakes, so it is worth recognizing on sight.
+#
+# THIS REPOSITORY IS PRIVATE, AND THAT IS THE SETTING THAT SILENTLY BREAKS
+# EVERYTHING. A private repository's reusable workflows are invisible to every
+# other repository until its Actions access is widened beyond the default of
+# `none`. It is set to `user` — "accessible from repositories owned by the
+# user":
+#
+#     gh api repos/lauerbr/.github/actions/permissions/access
+#
+# No Terraform resource in `github-as-code` manages that endpoint, so nothing
+# will restore it if it is turned back off. When a caller fails with "workflow
+# was not found" and the path above is provably correct, check this before
+# anything else — the error names the CALLER, never this setting.
+#
+# FIVE RULES FOR THIS FILE. Break any of them and you brick every repository
+# that calls it, all at once, which is the price of sharing one definition:
+#
+#   1. NO `paths:` or `paths-ignore:` filter reaches this job. That is the
+#      entire point of the file. A caller that path-filters its own workflow
+#      re-introduces the deadlock this job exists to prevent, so the caller
+#      must be unfiltered too.
+#   2. NO `if:` on the job — in particular no
+#      `github.event.pull_request.head.repo.full_name == github.repository`
+#      fork guard. That guard is correct on a job holding AWS credentials and
+#      fatal here: a fork pull request would never report the check and could
+#      never be merged. This job takes no credentials, reads no secrets and
+#      checks out no code, so running it from a fork costs nothing.
+#   3. NO `concurrency:` group. A cancelled run reports a cancelled check, and
+#      the job is five seconds long — there is nothing worth serializing, and
+#      every cancellation path is a way for the check not to be green.
+#   4. NO third-party actions, no `actions/checkout`, no network calls. The
+#      value of this job is that it always reports; every dependency added
+#      here is a new way for it to stop.
+#   5. Do NOT rename the job. See the paragraph below — the name is half of a
+#      contract with a string in another repository.
+#
+# THE CHECK NAME IS NOT `ci-gate`, AND THIS IS THE TRAP THAT MAKES MIGRATION
+# ITS OWN PIECE OF WORK. A called workflow's check reports as
+# `<caller's job name> / <called job name>` — so a caller whose job is named
+# `ci-gate` produces the check `ci-gate / ci-gate`, not `ci-gate`. Four
+# manifests in `github-as-code` currently require the literal string
+# `ci-gate`, which today is produced by each repository's own local copy. A
+# repository switched to this shared workflow stops producing that name and
+# starts producing a longer one, and a required check that no longer reports
+# is pending forever: the repository locks on the spot, with the manifest
+# still looking correct.
+#
+# So migrating a consumer is a three-step sequence in this order, per repo:
+# call this workflow on a branch, read the name GitHub actually produced with
+#
+#     gh api repos/lauerbr/REPO/commits/main/check-runs --jq '.check_runs[].name'
+#
+# and only then change `status_checks:` in that repository's manifest to
+# match. Reversed, or done in one change, the repository is unmergeable and
+# the fix requires an admin turning protection off.
+#
+# NO `pull_request:` OR `push:` TRIGGER HERE, DELIBERATELY. This workflow is
+# `workflow_call`-only, so it does not report a check on THIS repository's own
+# pull requests — which is exactly why `repos/.github.yaml` in `github-as-code`
+# names no required status check. Adding `pull_request:` here would make it
+# report locally and look like an improvement; it would also mean this file's
+# behavior differs depending on which repository is running it, and there is
+# nothing in this repository for a gate to guard.
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_call:
+
+# Nothing here reads the repository, so the token needs nothing. `contents:
+# read` rather than `{}` only because an empty permissions map is easy to
+# misread as "unset".
+permissions:
+  contents: read
+
+jobs:
+  ci-gate:
+    # This name is half of the check name the caller's branch protection sees.
+    # Read the note above before changing it.
+    name: ci-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report
+        run: |
+          echo "ci-gate always runs, which is what makes it safe to require."
+          echo "Read the header of .github/workflows/ci-gate.yml in lauerbr/.github before editing."
