@@ -1,0 +1,132 @@
+# ---------------------------------------------------------------------------
+# Weekly off-GitHub backup of this repository to S3.
+#
+# THIS REPOSITORY HOSTS THE REUSABLE WORKFLOW EVERY OTHER CALLER DEPENDS ON.
+# `repo-backup.yml` next to this file is the estate's shared backup job; seven
+# sibling repositories call it across repository boundaries. If this
+# repository were lost, all eight backup workflows would stop at once, and the
+# recovery path for the estate's CI — this repository's reusable workflows —
+# would be gone with it. That is why the host is backed up too, not only the
+# callers.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS CALLER IS NOT SHA-PINNED, UNLIKE EVERY SIBLING
+# ---------------------------------------------------------------------------
+#
+#     uses: ./.github/workflows/repo-backup.yml
+#
+# Every other caller in the estate writes
+# `uses: lauerbr/.github/.github/workflows/repo-backup.yml@<sha>`. This one
+# deliberately does not, and it should not be "fixed" to match them.
+#
+# GitHub supports a repository-relative path for a `workflow_call` workflow in
+# the same repository, and that form always resolves to the same commit as the
+# caller. Caller and callee are one file pair, in one commit, behind one
+# branch protection rule.
+#
+# The SHA pin exists to stop a change in ANOTHER repository from altering what
+# runs with this repository's credentials without review here. That threat does
+# not exist when the callee is the file sitting beside the caller: nothing can
+# change it except a pull request into this repository, which is the same
+# review the pin was buying. Pinning here would instead mean this file
+# silently keeps running an OLD copy of `repo-backup.yml` after the one beside
+# it is edited — the pin would create a divergence rather than prevent one.
+#
+# ---------------------------------------------------------------------------
+# WHAT SILENCE MEANS
+# ---------------------------------------------------------------------------
+#
+# A scheduled workflow only ever fires from the default branch, so nothing
+# here runs until this is merged to `main`, and edits on a branch have no
+# effect on the schedule. Use `workflow_dispatch` to exercise it after merge.
+#
+# GitHub also disables scheduled workflows after 60 days of repository
+# inactivity, notifying only the repository owner by email. A quiet repository
+# is exactly the kind that gets disabled, and once disabled "backups stopped"
+# and "backups are fine" look identical from the Actions tab — both show
+# nothing. Treat an absence of weekly runs as a failure to investigate, not as
+# a healthy silence.
+#
+# ---------------------------------------------------------------------------
+# TWO PREREQUISITES, NEITHER VISIBLE FROM A PULL REQUEST
+# ---------------------------------------------------------------------------
+#
+#   1. The `BACKUP_S3_BUCKET` repository variable must be set. It is a plain
+#      variable, not a secret — a bucket name is not a credential, and having
+#      it visible in run logs is what makes a failed backup diagnosable. It,
+#      and `AWS_BACKUP_ROLE_ARN`, are published by `github-as-code`'s
+#      Terraform; do not create them by hand.
+#   2. The backup IAM role must trust this repository's `main` subject
+#      (`StringEquals`, no wildcards).
+#
+# No `secrets:` block on purpose, and never `secrets: inherit`. The callee
+# authenticates to AWS with OIDC — that is what `id-token: write` below is for
+# — so there is no long-lived key to hand down. Inheriting would hand this
+# repository's whole secret set to the called workflow to paper over an auth
+# failure.
+#
+# No `environment:` key on any job. The backup role is pinned to
+# `repo:lauerbr/.github:ref:refs/heads/main`. An `environment:` REPLACES the
+# ref portion of the OIDC subject rather than adding to it, producing an
+# `environment:` claim that cannot match that trust policy.
+#
+# No `s3-prefix` input. It defaults to the repository name, `.github`, and the
+# IAM policy permits writes only under the `.github/` prefix. Overriding it
+# yields a 403 at upload time, after the archive has already been built.
+# ---------------------------------------------------------------------------
+
+name: Backup to S3
+
+on:
+  schedule:
+    # Sunday 02:00 UTC. Off-hours for a US-east operation, and far from the
+    # Monday-morning window where a broken backup would compete for attention.
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+
+# Default-deny at the top level; each job opts into exactly what it needs.
+permissions: {}
+
+# A manual dispatch during a scheduled run would race for the same S3 key.
+# cancel-in-progress: false — never abort a mid-upload backup.
+concurrency:
+  group: backup-s3
+  cancel-in-progress: false
+
+jobs:
+  # Fail loudly on an unset BACKUP_S3_BUCKET rather than calling the reusable
+  # workflow with an empty bucket name.
+  #
+  # Deliberately a failing gate and not `if: vars.BACKUP_S3_BUCKET != ''` on
+  # the backup job: a skipped job is a green run, and a green run that took no
+  # backup is exactly the failure mode you find out about the week you need the
+  # backup. A red run emails the repo owner.
+  preflight:
+    runs-on: ubuntu-latest
+    permissions: {}
+    env:
+      # Via env, not interpolated into the script: `${{ }}` inside a `run:`
+      # is substituted before the shell sees it, so the value would be parsed
+      # as shell rather than read as data.
+      BACKUP_S3_BUCKET: ${{ vars.BACKUP_S3_BUCKET }}
+    steps:
+      - name: Require BACKUP_S3_BUCKET
+        run: |
+          if [ -z "${BACKUP_S3_BUCKET}" ]; then
+            echo "::error::The BACKUP_S3_BUCKET repository variable is not set, so this run would have backed up to an empty bucket name. It is published by github-as-code's Terraform; check that this repository's manifest sets s3_backup.enabled, rather than adding the variable by hand."
+            exit 1
+          fi
+          echo "Backing up to s3://${BACKUP_S3_BUCKET}"
+
+  backup:
+    needs: preflight
+    permissions:
+      id-token: write # OIDC federation into the backup role
+      contents: read # the callee checks this repo out
+    # Repository-relative, not SHA-pinned — see the header. This always
+    # resolves to repo-backup.yml at this same commit.
+    uses: ./.github/workflows/repo-backup.yml
+    with:
+      s3-bucket: ${{ vars.BACKUP_S3_BUCKET }}
+      # Matches the region used across the estate's Terraform root modules.
+      aws-region: us-east-1
